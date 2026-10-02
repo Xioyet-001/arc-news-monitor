@@ -1,128 +1,92 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-ARC Raiders 官网新闻监控
-=======================
-- 抓取 https://arcraiders.com/news（国内可直连，不用翻墙）
-- 解析全部新闻（标题 + 日期 + 链接）
-- 与本地记录比对，发现新文章时通过 Server酱（方糖）推送到微信
-- 首次运行只建立基线，不推送旧闻
-"""
-
-import re
+import requests
 import json
 import os
-import html
-import urllib.parse
-import urllib.request
 
-NEWS_URL = "https://arcraiders.com/news"
+# 配置
+FEED_URL = "https://arcraiders.com/news"
+SCT_KEY = os.environ.get("SCT_SENDKEY", "")
 STATE_FILE = "seen_state.json"
-SENDKEY = os.environ.get("SCT_SENDKEY", "")
 
-# 匹配新闻列表里的每一条：<a href="/news/xxx"> ... 标题 ... 日期 ... </a>
-ROW_RE = re.compile(
-    r'<a class="news-article-row_row__[^"]*"[^>]*href="(/news/[^"]+)"[^>]*>.*?'
-    r'news-article-row_title__e__gM">(.*?)</span>\s*'
-    r'<span class="news-article-row_date__Z6Ego">(.*?)</span>',
-    re.S,
-)
-
-
-def fetch(url):
-    """抓取页面 HTML"""
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read().decode("utf-8", "ignore")
-
-
-def parse_news(text):
-    """从 HTML 中提取所有新闻条目（按出现顺序去重）"""
-    items = []
-    for m in ROW_RE.finditer(text):
-        url = "https://arcraiders.com" + m.group(1)
-        title = html.unescape(re.sub(r"<[^>]+>", "", m.group(2))).strip()
-        date = html.unescape(m.group(3)).strip()
-        items.append({"url": url, "title": title, "date": date})
-    seen, out = set(), []
-    for it in items:
-        if it["url"] not in seen:
-            seen.add(it["url"])
-            out.append(it)
-    return out
-
-
-def load_state():
-    """读取已见新闻 URL 集合"""
+def load_seen():
+    """加载已经推送过的新闻链接"""
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f).get("seen", []))
+                return set(json.load(f))
         except Exception:
             return set()
     return set()
 
-
-def save_state(seen):
-    """保存已见新闻 URL 集合"""
+def save_seen(seen_set):
+    """保存已推送链接到本地文件，供cache缓存保存"""
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"seen": sorted(seen)}, f, ensure_ascii=False)
+        json.dump(list(seen_set), f, ensure_ascii=False)
 
-
-def push_wechat(news_items):
-    """通过 Server酱推送新文章到微信"""
-    if not SENDKEY:
-        print("[!] 未配置环境变量 SCT_SENDKEY，跳过微信推送（本地调试可忽略）")
+def send_wechat(title, content):
+    """调用Server酱推送微信"""
+    if not SCT_KEY:
+        print("未配置SCT_SENDKEY，跳过推送")
         return
-    title = "ARC官网更新 %d 篇" % len(news_items)
-    lines = []
-    for it in news_items:
-        lines.append("%s\n%s\n%s" % (it["date"], it["title"], it["url"]))
-    desp = "\n\n".join(lines)
-    payload = urllib.parse.urlencode({"title": title, "desp": desp}).encode("utf-8")
-    url = "https://sctapi.ftqq.com/%s.send" % SENDKEY
-    req = urllib.request.Request(url, data=payload, method="POST")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read().decode("utf-8", "ignore")
+    url = f"https://sctapi.ftqq.com/{SCT_KEY}.send"
+    data = {
+        "title": title,
+        "desp": content
+    }
+    try:
+        resp = requests.post(url, data=data, timeout=15)
+        print("推送返回：", resp.text)
+    except Exception as e:
+        print("推送异常：", str(e))
+
+def get_news_list():
+    # 简单抓取官网新闻（适配ARC Raiders新闻页）
+    headers = {
+        "User‑Agent": "Mozilla/5.0 (Windows NT10; Win64; x64)"
+    }
+    resp = requests.get(FEED_URL, headers=headers, timeout=20)
+    resp.raise_for_status()
+    html = resp.text
+
+    # 简易提取新闻链接标题（根据页面a标签href="/news/*"）
+    import re
+    pattern = re.compile(r'<a href="(/news[^"]*)".*?>(.*?)</a>', re.S)
+    items = pattern.findall(html)
+    news = []
+    for href, title_raw in items:
+        full_url = "https://arcraiders.com" + href
+        title_clean = title_raw.strip().replace("\n","").replace("\r","")
+        if full_url not in [x["url"] for x in news]:
+            news.append({"title": title_clean, "url": full_url})
+    return news
 
 
 def main():
-    print("正在抓取：", NEWS_URL)
-    text = fetch(NEWS_URL)
-    news = parse_news(text)
-    print("解析到新闻 %d 条" % len(news))
+    seen = load_seen()
+    print(f"当前已记录已推送新闻数量：{len(seen)}")
+    news_list = get_news_list()
+    new_news = []
 
-    seen = load_state()
+    for item in news_list:
+        url = item["url"]
+        title = item["title"]
+        if url not in seen:
+            new_news.append(item)
 
-    # 首次运行 / 无历史记录：只建立基线，不推送
-    if not seen:
-        save_state({it["url"] for it in news})
-        print("首次运行：已建立基线，记录现有新闻 %d 条，本次不推送" % len(news))
+    if not new_news:
+        print("没有发现新新闻，结束运行")
+        save_seen(seen)
         return
 
-    new_items = [it for it in news if it["url"] not in seen]
-    if not new_items:
-        print("无新文章，监控正常。")
-        return
+    print(f"发现 {len(new_news)} 条新新闻，准备推送")
+    for n in new_news:
+        title_msg = f"ARC Raiders 新新闻：{n['title']}"
+        desp_msg = f"标题：{n['title']}\n链接：{n['url']}"
+        send_wechat(title_msg, desp_msg)
+        seen.add(n["url"])
 
-    for it in new_items:
-        seen.add(it["url"])
-    save_state(seen)
-
-    print("发现新文章 %d 篇：" % len(new_items))
-    for it in new_items:
-        print("  - %s | %s | %s" % (it["date"], it["title"], it["url"]))
-
-    result = push_wechat(new_items)
-    print("微信推送结果：", result[:200])
-
+    # 更新保存记录！非常关键
+    save_seen(seen)
+    print("已更新已推送记录文件")
 
 if __name__ == "__main__":
     main()
