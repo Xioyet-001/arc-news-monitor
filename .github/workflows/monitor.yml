@@ -14,7 +14,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 第一步：读取缓存（上次已经推送过的新闻）
       - name: 读取已推送记录缓存
         uses: actions/cache@v4
         id: cache_read
@@ -22,12 +21,14 @@ jobs:
           path: seen_state.json
           key: arc-news-seen-v1
 
+      - name: 安装Python依赖
+        run: pip install requests urllib3
+
       - name: 运行监控python脚本
         env:
           SCT_SENDKEY: ${{ secrets.SCT_SENDKEY }}
         run: python monitor.py
 
-      # 重点！脚本跑完再写一次缓存，保证文件被保存
       - name: 写入保存已推送记录缓存
         uses: actions/cache@v4
         with:
