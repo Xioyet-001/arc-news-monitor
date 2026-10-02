@@ -1,6 +1,8 @@
 import requests
 import json
 import os
+import time
+from requests.adapters import HTTPAdapter, Retry
 
 # 配置
 FEED_URL = "https://arcraiders.com/news"
@@ -39,11 +41,14 @@ def send_wechat(title, content):
         print("推送异常：", str(e))
 
 def get_news_list():
-    # 简单抓取官网新闻（适配ARC Raiders新闻页）
+    # 增加重试机制，应对GitHub网络波动
     headers = {
-        "User‑Agent": "Mozilla/5.0 (Windows NT10; Win64; x64)"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    resp = requests.get(FEED_URL, headers=headers, timeout=20)
+    session = requests.Session()
+    retry = Retry(total=3, backoff_factor=1)
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    resp = session.get(FEED_URL, headers=headers, timeout=(10,30))
     resp.raise_for_status()
     html = resp.text
 
@@ -63,9 +68,14 @@ def get_news_list():
 def main():
     seen = load_seen()
     print(f"当前已记录已推送新闻数量：{len(seen)}")
-    news_list = get_news_list()
-    new_news = []
+    try:
+        news_list = get_news_list()
+    except Exception as e:
+        print(f"抓取官网失败：{str(e)}")
+        save_seen(seen)
+        return
 
+    new_news = []
     for item in news_list:
         url = item["url"]
         title = item["title"]
